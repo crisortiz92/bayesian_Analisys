@@ -1,0 +1,144 @@
+---
+title: "Análisis Bayesiano utilizando Rstan - Accidentes de tránsito en Finlandia"
+author: "Cristhian Ortiz"
+date: "Trabajo Final de Curso"
+output:
+  html_document:
+    fig_caption: yes
+    toc: TRUE
+    toc_depth: 2
+    number_sections: TRUE
+    toc_float:
+      smooth_scroll: FALSE
+    theme: readable
+    code_download: true
+   
+---
+
+# Inicialización  {.unnumbered}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=FALSE, message=FALSE, error=FALSE, warning=TRUE, out.width='95%')
+```
+**Paquetes Requeridos **
+```{r, comment=NA}
+library(ggplot2)
+library(tidyr)
+library(gridExtra)
+library(rstanarm)
+library(rstan)
+library(bayesplot)
+
+theme_set(theme_minimal()) #ggplot theme
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+setwd("C:/Users/Cristhian/Desktop/Rstan")
+```
+
+# Introducción
+El presente Código muestra un análisis de series de tiempo del número de muertes ocurridas por accidentes de tránsito al año en Finlandia.
+
+# Data
+Importamos el registro de muertes por accidente de tránsito en Finlandia desde el año 1993 al 2016
+
+```{r}
+
+deaths <- read.csv("./trafficdeaths.csv")
+head(deaths)
+
+```
+
+Realizando un gráfico para observar la distribución de los datos
+
+```{r}
+ggplot() +
+    geom_point(aes(year, deaths), data = deaths, size = 1) +
+    labs(y = 'Muertes por accidentes de Tránsito', x= "Año") +
+    guides(linetype = F)
+
+```
+
+# Modelo de regresión de Poisson
+El número de muertes son count data (datos en el que las observaciones solo son valores enteros no negativos),  por lo que usamos el modelo Poisson.
+Primero Fijamos el modelo log-lineal para la intensidad de Poisson, que corresponde a suponer un cambio proporcional constante. 
+
+
+```{r}
+fit_lin <- stan_glm(deaths ~ year, data=deaths, family="poisson",
+                    refresh=100, iter=1000, chains=4, seed=1234, refresh=0)
+```
+Veamos la distribución predictiva posterior (mediana e intervalos de 5% y 95%).
+
+```{r}
+
+x_predict <- seq(1993,2025)
+N_predict <- length(x_predict)
+y_predict <- posterior_predict(fit_lin, newdata=data.frame(year=x_predict))
+mu <- apply(t(y_predict), 1, quantile, c(0.05, 0.5, 0.95)) %>%
+    t() %>% data.frame(x = x_predict, .) %>% gather(pct, y, -x)
+pfit <- ggplot() +
+    geom_point(aes(year, deaths), data = deaths, size = 1) +
+    geom_line(aes(x, y, linetype = pct), data = mu, color = 'blue') +
+    scale_linetype_manual(values = c(2,1,2)) +
+    labs(x = 'Año', y = 'Muertes por accidentes de Tránsito') +
+    guides(linetype = F)
+(pfit)
+```
+
+A continuación, ajustamos un modelo "spline no lineal" con stan_gamm4 (permite que los predictores designados tengan un efecto no lineal)
+
+```{r}
+fit_gam <- stan_gamm4(deaths ~ year + s(year), data=deaths,
+                      family="poisson", adapt_delta=0.999, 
+                      refresh=100, iter=1000, chain=4, seed=1234, refresh=0)
+monitor(fit_gam$stanfit)
+
+```
+Construyendo la distribución predictiva posterior.
+
+```{r}
+x_predict=seq(1993,2025)
+N_predict=length(x_predict)
+y_predict <- posterior_predict(fit_gam, newdata=data.frame(year=x_predict))
+mu <- apply(t(y_predict), 1, quantile, c(0.05, 0.5, 0.95)) %>%
+    t() %>% data.frame(x = x_predict, .) %>% gather(pct, y, -x)
+pfit <- ggplot() +
+    geom_point(aes(year, deaths), data = deaths, size = 1) +
+    geom_line(aes(x, y, linetype = pct), data = mu, color = 'blue') +
+    scale_linetype_manual(values = c(2,1,2)) +
+    labs(x = 'Año', y = 'Muertes por accidentes de Tránsito') +
+    guides(linetype = F)
+
+(pfit)
+```
+La mediana predictiva es claramente no lineal. La media de predicción para los años futuros se mantiene al mismo nivel que las observaciones más recientes, pero la incertidumbre aumenta rápidamente.
+Finalmente ajustamos el proceso gaussiano centrado en el modelo lineal usando el lenguaje Stan:
+```{r}
+N<-nrow(deaths)
+Ey<-mean(deaths$deaths)
+d_data <- list(N=N, x=deaths$year, y=deaths$deaths, Ey=Ey, N_predict=N_predict,
+               x_predict=x_predict, alpha0=2, beta0=4)
+fit_gp <- stan("./poisson_gp.stan", data=d_data, refresh=100, iter=1000,
+               chains=4, seed=1234, init=0, control=list(adapt_delta=0.999))
+monitor(fit_gp)
+
+```
+Calculemos la distribución predictiva posterior.
+
+```{r}
+gp_params <- extract(fit_gp)
+mu <- apply(t(gp_params$y_predict), 1, quantile, c(0.05, 0.5, 0.95)) %>%
+    t() %>% data.frame(x = x_predict, .) %>% gather(pct, y, -x)
+pfit <- ggplot() +
+    geom_point(aes(year, deaths), data = deaths, size = 1) +
+    geom_line(aes(x, y, linetype = pct), data = mu, color = 'blue') +
+    scale_linetype_manual(values = c(2,1,2)) +
+    labs(x = 'Anio', y = 'Muertes por Accidentes de Transito') +
+    guides(linetype = F)
+(pfit)
+```
+
+No existen diferencias prácticas en el rendimiento predictivo, lo que se debe en parte al pequeño número de observaciones. Sobre la base de las distribuciones predictivas posteriores, existen claras diferencias en las predicciones futuras.
+
+Código disponible [repositorio](https://duckduckgo.com).
